@@ -7,10 +7,10 @@ defined in [RFC 9113](https://datatracker.ietf.org/doc/rfc9113).
 
 Within a Bandit server, an HTTP/2 connection is modeled as a set of processes:
 
-* 1 process per connection, a `Bandit.HTTP2.Handler` module implementing the
+* 1 process per connection, a `Bandit.HTTP2.Handler` GenServer implementing the
   `ThousandIsland.Handler` behaviour, and;
 * 1 process per stream (i.e.: per HTTP request) within the connection, implemented as
-  a `Bandit.HTTP2.StreamTask` Task
+  a `Bandit.HTTP2.StreamTask` GenServer
 
 The lifetimes of these processes correspond to their role; a connection process lives for as long
 as a client is connected, and a stream process lives only as long as is required to process
@@ -45,7 +45,7 @@ looks like the following:
    matching within the `Bandit.HTTP2.Connection.handle_frame/3` function. Any side-effects of
    received frames are applied in these functions, and an updated connection struct is returned to
    represent the updated connection state. These side-effects can take the form of starting stream
-   tasks, conveying data to running stream tasks, responding to the client with various frames, or
+   processes, conveying data to running stream processes, responding to the client with various frames, or
    any number of other actions
 4. This process is repeated every time we receive data from the client until the
    `Bandit.HTTP2.Connection` module indicates that the connection should be closed, either

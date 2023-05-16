@@ -4,15 +4,14 @@ defmodule Bandit.HTTP2.StreamTask do
   # is a bit of split responsibility between this module and the `Bandit.HTTP2.Adapter` module
   # which merits explanation:
   #
-  # Broadly, this module is responsible for the execution of a Plug and does so within a Task
-  # process. Task is used in preference to GenServer here because of the shape of the
-  # `Plug.Conn.Adapter` API (implemented by the `Bandit.HTTP2.Adapter` module). Specifically, that
-  # API requires blocking semantics for the `Plug.Conn.Adapter.read_req_body/2`) call and expects
-  # it to block until some underlying condition has been met (the body has been read, a timeout
-  # has occurred, etc). The events which 'unblock' these conditions typically come from within the
-  # Connection, and are pushed down to streams as a fundamental design decision (rather than
-  # having stream processes query the connection directly). As such, it is much simpler for Task
-  # processes to wait in an imperative fashion using `receive` calls directly.
+  # Broadly, this module is responsible for the execution of a Plug and does so within a GenServer
+  # process. Despite being implemented as a GenServer, there are some imperative `receive` calls
+  # within the `Bandit.HTTP2.Adapter` module). Specifically, that API requires blocking semantics
+  # for the `Plug.Conn.Adapter.read_req_body/2`) call and expects it to block until some
+  # underlying condition has been met (the body has been read, a timeout has occurred, etc). The
+  # events which 'unblock' these conditions typically come from within the Connection, and are
+  # pushed down to streams as a fundamental design decision (rather than having stream processes
+  # query the connection directly). 
   #
   # To contain these design decisions, the 'connection-facing' API for sending data to a stream
   # process is expressed on this module (via the `recv_*` functions) even though the 'other half'
@@ -20,7 +19,7 @@ defmodule Bandit.HTTP2.StreamTask do
   # Handler module are fairly tightly coupled, but together they express clear APIs towards both
   # Plug applications and the rest of Bandit.
 
-  use Task
+  use GenServer, restart: :temporary
 
   # credo:disable-for-this-file Credo.Check.Design.AliasUsage
 
@@ -34,7 +33,7 @@ defmodule Bandit.HTTP2.StreamTask do
           Bandit.Telemetry.t()
         ) :: {:ok, pid()}
   def start_link(req, transport_info, headers, plug, span) do
-    Task.start_link(__MODULE__, :run, [req, transport_info, headers, plug, span])
+    GenServer.start_link(__MODULE__, [req, transport_info, headers, plug, span])
   end
 
   # Let the stream task know that body data has arrived from the client. The other half of this
@@ -52,7 +51,11 @@ defmodule Bandit.HTTP2.StreamTask do
   @spec recv_rst_stream(pid(), Bandit.HTTP2.Errors.error_code()) :: true
   def recv_rst_stream(pid, error_code), do: Process.exit(pid, {:recv_rst_stream, error_code})
 
-  def run(req, transport_info, all_headers, plug, span) do
+  def init(args) do
+    {:ok, args, {:continue, :run}}
+  end
+
+  def handle_continue(:run, [req, transport_info, all_headers, plug, span] = state) do
     with {:ok, request_target} <- build_request_target(all_headers),
          {:ok, pseudo_headers, headers} <- split_headers(all_headers),
          :ok <- pseudo_headers_all_request(pseudo_headers),
@@ -69,11 +72,14 @@ defmodule Bandit.HTTP2.StreamTask do
          {:ok, %Plug.Conn{adapter: {Bandit.HTTP2.Adapter, req}} = conn} <-
            Bandit.Pipeline.run(adapter, transport_info, method, request_target, headers, plug) do
       Bandit.Telemetry.stop_span(span, Map.put(req.metrics, :conn, conn))
-      :ok
+      {:noreply, state}
     else
       {:error, reason} -> raise Bandit.HTTP2.Stream.StreamError, reason
     end
   end
+
+  def handle_info({:plug_conn, :sent}, state), do: {:noreply, state}
+  def handle_info(:end_stream, state), do: {:noreply, state}
 
   defp build_request_target(headers) do
     with scheme <- Bandit.Headers.get_header(headers, ":scheme"),
